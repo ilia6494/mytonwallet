@@ -1,0 +1,78 @@
+;; Simple Wallet Contract
+;; Allows sending TON to any address without restrictions
+;; Minimal replay protection with seqno
+
+int err::wrong_signature() asm "31 PUSHINT";
+int err::wrong_seqno() asm "34 PUSHINT";
+int err::wrong_subwallet_id() asm "35 PUSHINT";
+
+;; Load data from storage
+_ load_data() {
+  var cs = get_data().begin_parse();
+  var res = (
+    cs~load_uint(32),  ;; seqno
+    cs~load_uint(32),  ;; subwallet_id
+    cs~load_uint(256)  ;; public_key
+  );
+  cs.end_parse();
+  return res;
+}
+
+;; Save data to storage
+_ save_data(int seqno, int subwallet_id, int public_key) impure {
+  return begin_cell()
+    .store_uint(seqno, 32)
+    .store_uint(subwallet_id, 32)
+    .store_uint(public_key, 256)
+    .end_cell().set_data();
+}
+
+;; Process external messages
+() recv_external(slice in_msg) impure {
+  var signature = in_msg~load_bits(512);  ;; Load 512-bit signature
+  var cs = in_msg;
+  var (subwallet_id, valid_until, msg_seqno) = (cs~load_uint(32), cs~load_uint(32), cs~load_uint(32));
+  
+  ;; Load stored data
+  var (stored_seqno, stored_subwallet, public_key) = load_data();
+  
+  ;; Validate seqno and subwallet_id
+  throw_unless(err::wrong_seqno(), msg_seqno == stored_seqno);
+  throw_unless(err::wrong_subwallet_id(), subwallet_id == stored_subwallet);
+  
+  ;; Validate signature
+  throw_unless(err::wrong_signature(), check_signature(slice_hash(in_msg), signature, public_key));
+  
+  ;; Process all messages in the bag-of-cells
+  cs~touch();
+  while (cs.slice_refs()) {
+    var mode = cs~load_uint(8);  ;; Load send mode
+    var msg = cs~load_ref();     ;; Load message
+    send_raw_message(msg, mode);  ;; Send message with specified mode
+  }
+  
+  ;; Increment seqno and save data
+  save_data(stored_seqno + 1, stored_subwallet, public_key);
+  accept_message();
+}
+
+;; Empty internal message handler
+() recv_internal() impure {
+}
+
+;; Get methods
+int seqno() method_id {
+  return get_data().begin_parse().preload_uint(32);
+}
+
+int wallet_id() method_id {
+  var ds = get_data().begin_parse();
+  ds~load_uint(32);
+  return ds.preload_uint(32);
+}
+
+int get_public_key() method_id {
+  var ds = get_data().begin_parse();
+  ds~load_uint(32 + 32);
+  return ds.preload_uint(256);
+}
